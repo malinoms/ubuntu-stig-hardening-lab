@@ -8,10 +8,13 @@ I took a fresh Ubuntu 24.04 server and hardened it against the DISA STIG using O
 |---|---|---|
 | Baseline, stock patched server | 45% (54 of 119) | 51.38% |
 | After six fixes | not recorded | 60.03% |
+| After Fix 10 | not recorded | 61.22% |
+| After Fix 11 | not recorded | 62.02% |
+| After sixteen fixes | not recorded | 68.60% |
 
-The baseline pass rate and the oscap score are measured differently. Details are in [results/summary.md](results/summary.md).
+The oscap score went from **51.38% to 68.60%** across sixteen fixes. The baseline pass rate and the oscap score are measured differently, and I only kept the pass rate for the baseline. Details are in [results/summary.md](results/summary.md).
 
-## The six fixes
+## The sixteen fixes
 
 Rule IDs are shown without the `xccdf_org.ssgproject.content_rule_` prefix.
 
@@ -23,6 +26,16 @@ Rule IDs are shown without the `xccdf_org.ssgproject.content_rule_` prefix.
 | 4 | Lock accounts after 3 failed password attempts | `accounts_passwords_pam_faillock_deny` |
 | 5 | Log out idle shells after 10 minutes (TMOUT=600) | `accounts_tmout` |
 | 6 | Install and enable the audit system | `package_audit_installed`, `service_auditd_enabled` |
+| 7 | Restrict the audit rules file to root | `file_permissions_etc_audit_rulesd` |
+| 8 | Install the password-quality module | `package_pam_pwquality_installed` |
+| 9 | Install vlock so users can lock their session | `vlock_installed` |
+| 10 | Install smart-card (OpenSC) support | `package_opensc_installed` |
+| 11 | Require a password for sudo | `sudo_remove_nopasswd` |
+| 12 | SSH daemon settings: keepalive, idle timeout, no empty passwords, no X11 forwarding, no user environment, pubkey auth | `sshd_set_keepalive`, `sshd_set_idle_timeout`, `sshd_disable_empty_passwords`, `sshd_disable_x11_forwarding`, `sshd_x11_use_localhost`, `sshd_do_not_permit_user_env`, `sshd_enable_pubkey_auth` |
+| 13 | Kernel settings (SYN cookies, dmesg restriction, ASLR) and block USB storage | `sysctl_net_ipv4_tcp_syncookies`, `sysctl_kernel_dmesg_restrict`, `sysctl_kernel_randomize_va_space`, `kernel_module_usb-storage_disabled` |
+| 14 | Enable the ufw firewall (deny incoming) with a rate-limited SSH rule | `check_ufw_active`, `ufw_rate_limit` |
+| 15 | Replace systemd-timesyncd with chrony | `package_chrony_installed`, `package_timesyncd_removed` |
+| 16 | Tighten journal, `journalctl` and `/var/log` permissions | `dir_permissions_system_journal`, `file_permissions_journalctl`, `file_permissions_var_log_stig` |
 
 ## Method
 
@@ -48,7 +61,7 @@ The commands are the easy part. These are the calls that mattered.
 
 **Verify every change by hand.** "No error" doesn't mean a change worked, so I check the actual system state after each fix and rescan the rule. For TMOUT, the old window still showed it blank, and only a new session showed `600`, because login settings apply to new sessions. I treat tool output and AI suggestions as inputs to check: an assistant's guesses on a rule name and on the timeout value were both wrong, and verifying against the system caught both.
 
-**Report the scores honestly.** OpenSCAP reports a weighted score, and the simple pass rate is a different number. The baseline was a 45% pass rate (54 of 119 applicable rules) but a 51.38% weighted score, and the scan after six fixes scored 60.03% weighted. I report the weighted scores side by side rather than quoting 45% to 60%, which would compare two different measures.
+**Report the scores honestly.** OpenSCAP reports a weighted score, and the simple pass rate is a different number. The baseline was a 45% pass rate (54 of 119 applicable rules) but a 51.38% weighted score, and the scan after sixteen fixes scored 68.60% weighted. I report the weighted scores side by side (51.38% to 68.60%) rather than quoting 45% to 68.60%, which would compare two different measures. I didn't record per-rule counts for the later scans, so I don't claim any.
 
 **Isolate the lab network from the home LAN.** The lab VMs needed internet for patches and tools, but I didn't want them reaching my home network. I chose NAT over copying files in by hand, allowed outbound traffic only, added an explicit rule dropping lab traffic to my home LAN, and keep deliberately vulnerable practice VMs powered off while NAT is on. That gave me patching without giving up segmentation.
 
@@ -57,7 +70,7 @@ The commands are the easy part. These are the calls that mattered.
 ```
 .
 ├── README.md            this overview
-├── runbook.md           step-by-step commands and checks for each fix
+├── runbook.md           step-by-step commands and checks for Fixes 1 to 16
 ├── lab-notes.md         my lab log, Steps 1 to 13, including mistakes and decisions
 └── results/
     └── summary.md       baseline counts, scores, and remaining failures
@@ -73,7 +86,8 @@ The raw OpenSCAP XML and HTML reports are not published because they contain hos
 
 ## Next steps
 
-- Work through more findings: AIDE file integrity, sudo NOPASSWD, password quality, SSH daemon settings, and the remaining faillock options.
+- Work through more findings: AIDE file integrity, the remaining password and faillock options, the second sudo rule, and the boot loader password.
+- Write up (not fix) the smart-card, MFA and FIPS rules as accepted risk for a home lab.
 - Run a final full rescan and publish the pass and fail counts alongside the score.
 - Add the rescan summary and a short write-up of what changed between scans.
 
