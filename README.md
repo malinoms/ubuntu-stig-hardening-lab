@@ -11,10 +11,14 @@ I took a fresh Ubuntu 24.04 server and hardened it against the DISA STIG using O
 | After Fix 10 | not recorded | 61.22% |
 | After Fix 11 | not recorded | 62.02% |
 | After sixteen fixes | not recorded | 68.60% |
+| Nov 2, later full scans | 96 and 97 passed | 68.73%, then 67.95% |
+| Nov 3, about 5:07 PM | 98 passed, 116 failed | 68.74% |
+| Nov 3, about 5:34 PM | 157 passed, 57 failed | 72.15% |
+| Nov 3, about 5:54 PM | 178 passed, 36 failed | 75.3% |
 
-The oscap score went from **51.38% to 68.60%** across sixteen fixes. The baseline pass rate and the oscap score are measured differently, and I only kept the pass rate for the baseline. Details are in [results/summary.md](results/summary.md).
+The oscap score went from **51.38% to 75.3%** across twenty-three fixes. The baseline pass rate and the oscap score are measured differently, and I only kept the pass rate for the baseline. The 75.3% scan was taken before one last permission fix (`/var/log/audit`, see Fix 23), so I have not rescanned that yet. Details are in [results/summary.md](results/summary.md).
 
-## The sixteen fixes
+## The twenty-three fixes
 
 Rule IDs are shown without the `xccdf_org.ssgproject.content_rule_` prefix.
 
@@ -36,6 +40,13 @@ Rule IDs are shown without the `xccdf_org.ssgproject.content_rule_` prefix.
 | 14 | Enable the ufw firewall (deny incoming) with a rate-limited SSH rule | `check_ufw_active`, `ufw_rate_limit` |
 | 15 | Replace systemd-timesyncd with chrony | `package_chrony_installed`, `package_timesyncd_removed` |
 | 16 | Tighten journal, `journalctl` and `/var/log` permissions | `dir_permissions_system_journal`, `file_permissions_journalctl`, `file_permissions_var_log_stig` |
+| 17 | Audit rules that log `ssh-agent` and `ssh-keysign` use | audit rules for `ssh-agent` and `ssh-keysign` |
+| 18 | No root login over SSH, and the exact approved encryption lists | `sshd_disable_root_login`, `sshd_use_approved_ciphers_ordered_stig`, `sshd_use_approved_macs_ordered_stig`, `sshd_use_approved_kex_ordered_stig` |
+| 19 | Audit rules for 17 privileged commands plus `fdisk` and `modprobe` | the privileged-command audit rules |
+| 20 | Audit watches on account, login-record and cron files (15 paths) | the file-watch audit rules |
+| 21 | Audit rules for system calls: permission changes, deletes, failed access, kernel modules, privilege use | the system-call audit rules |
+| 22 | Password quality, password age, default file permissions (`UMASK 077`) and a limit of 10 logins | `pwquality` rules, `accounts_maximum_age_login_defs`, `accounts_minimum_age_login_defs`, `accounts_umask_etc_login_defs`, `accounts_max_concurrent_login_sessions` |
+| 23 | Audit daemon log group and free-space settings, and private audit logs | the `auditd.conf` and audit log permission rules |
 
 ## Method
 
@@ -61,16 +72,18 @@ The commands are the easy part. These are the calls that mattered.
 
 **Verify every change by hand.** "No error" doesn't mean a change worked, so I check the actual system state after each fix and rescan the rule. For TMOUT, the old window still showed it blank, and only a new session showed `600`, because login settings apply to new sessions. I treat tool output and AI suggestions as inputs to check: an assistant's guesses on a rule name and on the timeout value were both wrong, and verifying against the system caught both.
 
-**Report the scores honestly.** OpenSCAP reports a weighted score, and the simple pass rate is a different number. The baseline was a 45% pass rate (54 of 119 applicable rules) but a 51.38% weighted score, and the scan after sixteen fixes scored 68.60% weighted. I report the weighted scores side by side (51.38% to 68.60%) rather than quoting 45% to 68.60%, which would compare two different measures. I didn't record per-rule counts for the later scans, so I don't claim any.
+**Report the scores honestly.** OpenSCAP reports a weighted score, and the simple pass rate is a different number. The baseline was a 45% pass rate (54 of 119 applicable rules) but a 51.38% weighted score, and the latest scan scored 75.3% weighted (178 rules passed, 36 failed). I report the weighted scores side by side (51.38% to 75.3%) rather than quoting 45% to 75.3%, which would compare two different measures. I didn't record per-rule counts for the scans before November 3, so I don't claim any. The score also does not rise one-for-one with rules passed: 59 more rules passing moved it only 3.4 points.
 
 **Isolate the lab network from the home LAN.** The lab VMs needed internet for patches and tools, but I didn't want them reaching my home network. I chose NAT over copying files in by hand, allowed outbound traffic only, added an explicit rule dropping lab traffic to my home LAN, and keep deliberately vulnerable practice VMs powered off while NAT is on. That gave me patching without giving up segmentation.
+
+**Things that surprised me on November 3.** Files in `/etc/audit/rules.d/` must be `0600`; `0640` made an earlier rule fail again. The extended-attribute audit rules need one line for regular users and a second for root. With `UMASK 077`, scan reports created by root are root-only, so I `chown` them before copying them off the VM. The scanner wants the exact, ordered SSH encryption lists from the STIG fix script, not the text in the rule description. And one fix (`log_group = root`) quietly broke a rule that already passed, which I only caught by comparing two scans rule by rule. I save the audit "immutable" rule (`-e 2`) for last, because it locks the audit rules until the next reboot.
 
 ## Repo layout
 
 ```
 .
 ├── README.md            this overview
-├── runbook.md           step-by-step commands and checks for Fixes 1 to 16
+├── runbook.md           step-by-step commands and checks for Fixes 1 to 23
 ├── lab-notes.md         my lab log, Steps 1 to 13, including mistakes and decisions
 └── results/
     └── summary.md       baseline counts, scores, and remaining failures
@@ -86,10 +99,10 @@ The raw OpenSCAP XML and HTML reports are not published because they contain hos
 
 ## Next steps
 
-- Work through more findings: AIDE file integrity, the remaining password and faillock options, the second sudo rule, and the boot loader password.
-- Write up (not fix) the smart-card, MFA and FIPS rules as accepted risk for a home lab.
-- Run a final full rescan and publish the pass and fail counts alongside the score.
-- Add the rescan summary and a short write-up of what changed between scans.
+- Rescan after the `/var/log/audit` permission fix.
+- Work through the 36 remaining findings: AIDE file integrity, sudo authentication, the password delay after a failed login, password hashing, the boot loader password, remote logging, chrony time sync, and the audit "immutable" rule last.
+- Write up (not fix) the smart-card, FIPS mode and remote audit server rules as accepted risk for a home lab.
+- Add a short write-up of what changed between scans.
 
 ## Disclaimer
 

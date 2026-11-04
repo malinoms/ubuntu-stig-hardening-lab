@@ -32,8 +32,13 @@ The raw XML and HTML reports are not published here because they contain host de
 | Fix 10 | 61.22% | Fixes 7 to 10 |
 | Fix 11 | 62.02% | sudo now asks for a password |
 | Fix 16 | 68.60% | Fixes 12 to 16 (raw score 68.596458) |
+| Nov 2, full scan | 68.73% | 96 pass |
+| Nov 2, later scan | 67.95% | 97 pass. The score went down slightly while one more rule passed; I did not compare the two reports rule by rule |
+| Nov 3, about 5:07 PM | 68.74% | 98 pass, 116 fail. Fixes 17 and 18 (every SSH rule passes) |
+| Nov 3, about 5:34 PM | 72.15% | 157 pass, 57 fail. Fixes 19 to 21 (59 audit rules) |
+| Nov 3, about 5:54 PM | 75.3% | 178 pass, 36 fail. Fixes 22 and 23. 23 rules newly pass, 1 regressed (`directory_permissions_var_log_audit`) |
 
-I only kept the headline score for the scans after the baseline, so per-rule pass and fail counts for those scans are not listed here. The pass rate (45%) is only known for the baseline, so the table compares the weighted oscap score throughout. I plan to add counts with the next full rescan.
+I only kept the headline score for the scans between the baseline and November 2, so per-rule counts for those scans are not listed here. From November 2 on I kept the counts. The table compares the weighted oscap score throughout. The score does not rise one-for-one with rules passed: going from 98 to 157 passed rules moved it 3.4 points. The `/var/log/audit` permission fix was made after the 5:54 PM scan and has not been rescanned yet.
 
 Scan commands, and a lesson from the Fix 16 rescan: the content file was in my home folder (`~/scap-security-guide-0.1.82/ssg-ubuntu2404-ds.xml`), not under `/usr/share`. My first command sent all output to `/dev/null`, so the wrong path only showed up as a missing results file. Discard stdout only, so errors stay visible.
 
@@ -77,18 +82,17 @@ Scan commands, and a lesson from the Fix 16 rescan: the content file was in my h
 
 Rule IDs are shown without the `xccdf_org.ssgproject.content_rule_` prefix. I applied these fixes to target these rules. I did not record per-rule results from the later rescans, only the overall score.
 
-## Remaining baseline failures, by area
+## Still failing after the 75.3% scan (36 rules)
 
-These are the baseline failures that Fixes 1 to 16 did not target, grouped to plan the next fixes. The SSH daemon, firewall, kernel and time sync groups are now fully covered by Fixes 12 to 15. That is based on which rules I targeted, not on a per-rule rescan.
+- **File integrity (AIDE):** build the database, protect the audit tools, turn off silent reports
+- **FIPS mode** (a U.S. government encryption standard)
+- **sudo:** the "NOPASSWD" and "require authentication" rules
+- **Updates:** clean up old components after updating
+- **Passwords:** a delay after a failed login (faildelay), password hashing and rounds, no empty passwords, disable accounts after the password expires
+- **Smart card login:** 7 rules, probably documented as accepted risk on a home lab
+- **Boot loader:** a grub2 password, and the audit setting on the boot line
+- **Logging:** rsyslog remote monitoring, journal folder permissions, `/var/log` file permissions, system library ownership
+- **Time sync (chrony):** 4 rules
+- **Audit, last:** the immutable rule, sudo log events, and a remote audit server with log offload
 
-- **File integrity (AIDE):** `package_aide_installed`, `aide_build_database`, `aide_check_audit_tools`, `aide_disable_silentreports`, `aide_periodic_cron_checking`
-- **FIPS and crypto:** `is_fips_mode_enabled`, `sshd_use_approved_ciphers_ordered_stig`, `sshd_use_approved_kex_ordered_stig`, `sshd_use_approved_macs_ordered_stig`
-- **sudo:** `sudo_require_authentication`
-- **Passwords and lockout:** `accounts_passwords_pam_faildelay_delay`, `accounts_passwords_pam_faillock_audit`, `accounts_passwords_pam_faillock_interval`, `accounts_passwords_pam_faillock_silent`, `accounts_passwords_pam_faillock_unlock_time`, `set_password_hashing_algorithm_auth_stig`, `accounts_password_pam_unix_rounds_password_auth`, `accounts_maximum_age_login_defs`, `accounts_minimum_age_login_defs`, `account_disable_post_pw_expiration`, `no_empty_passwords`
-- **Sessions:** `accounts_max_concurrent_login_sessions`, `accounts_umask_etc_login_defs`
-- **Smart card and MFA** (probably documented as accepted risk instead of fixed on a home lab): `install_smartcard_packages`, `smartcard_configure_ca`, `smartcard_configure_cert_checking`, `smartcard_configure_crl`, `smartcard_pam_enabled`, `package_nss_sss_installed`, `package_pam_sss_installed`
-- **Boot loader:** `grub2_password`, `grub2_uefi_password`, `grub2_audit_argument`
-- **Logging and audit:** `rsyslog_remote_access_monitoring`, `package_audit-audispd-plugins_installed`
-- **Packages:** `clean_components_post_updating`
-
-Not checked at baseline (need a manual review): `account_temp_expire_date`, `ensure_sudo_group_restricted`, `ufw_only_required_services`, `only_allow_dod_certs`.
+The `directory_permissions_var_log_audit` regression has been fixed (`chmod 0700 /var/log/audit`) but not rescanned.
