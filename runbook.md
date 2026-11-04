@@ -1,6 +1,6 @@
 # Ubuntu 24.04 STIG Hardening Runbook
 
-How to use this: work through each finding in order. Run the commands on the target server, then run the verify step. Every finding is tied to the rule title in the OpenSCAP report. This runbook covers Fixes 1 to 16.
+How to use this: work through each finding in order. Run the commands on the target server, then run the verify step. Every finding is tied to the rule title in the OpenSCAP report. This runbook covers Fixes 1 to 23.
 
 Placeholders used below: `<vmid>` is the Proxmox VM ID of the lab VM, `<user>` is the admin account on the lab VM, `<proxmox-host>` and `<lab-vm>` are addresses, and `~/.ssh/<lab-key>` is the SSH key used for the lab.
 
@@ -486,17 +486,330 @@ My first scan command used `/usr/share/xml/scap/ssg/content/` for the content fi
 
 ---
 
+## Fix 17: Audit rules for ssh-agent and ssh-keysign (2 rules)
+
+**Rules:** the two audit rules that watch execution of `ssh-agent` and `ssh-keysign`
+
+### The finding
+Nothing recorded it when a user ran `ssh-agent` or `ssh-keysign`. Both handle SSH keys, so the STIG wants every use logged.
+
+### Why it matters
+If someone uses a key-handling tool, the audit log should show who and when.
+
+### Safety first
+Audit rules only add logging, so there is no lockout risk. Take a snapshot anyway: `qm snapshot <vmid> before-audit-rules`.
+
+### The fix
+```bash
+sudo tee /etc/audit/rules.d/stig-ssh.rules >/dev/null <<'EOF2'
+-a always,exit -F path=/usr/bin/ssh-agent -F perm=x -F auid>=1000 -F auid!=unset -k privileged-ssh
+-a always,exit -F path=/usr/lib/openssh/ssh-keysign -F perm=x -F auid>=1000 -F auid!=unset -k privileged-ssh
+EOF2
+sudo chmod 0600 /etc/audit/rules.d/stig-ssh.rules
+sudo augenrules --load
+sudo auditctl -l | grep -E 'ssh-agent|ssh-keysign'
+```
+- `-F perm=x` logs execution. `-F auid>=1000 -F auid!=unset` means "real logged-in users, not system services."
+- `-k privileged-ssh` is a label I chose so I can search the log later.
+- `augenrules --load` merges every file in `/etc/audit/rules.d/` and loads the result.
+
+### Verify
+- `sudo auditctl -l` lists both rules.
+- `sudo ls -l /etc/audit/rules.d/` shows `-rw-------` on the new file.
+
+### Lesson learned: the file must be `0600`, not `0640`
+My first attempt left the new file at `0640`. The earlier rule `file_permissions_etc_audit_rulesd` (Fix 7) checks **every** file in that folder, so `0640` made that rule fail again. Run `chmod 0600` on every new file in `/etc/audit/rules.d/`.
+
+---
+
+## Fix 18: SSH root login and approved encryption lists
+
+**Rules:** `sshd_disable_root_login` and the three "approved ciphers, MACs and key exchange, in order" rules (`sshd_use_approved_ciphers_ordered_stig`, `sshd_use_approved_macs_ordered_stig`, `sshd_use_approved_kex_ordered_stig`)
+
+### The finding
+These rules still failed after Fix 12, even though the SSH daemon already used strong settings.
+
+### Why it matters
+The STIG allows only a short list of encryption methods. It also requires `PermitRootLogin no`, so nobody can log in directly as root over SSH.
+
+### The fix
+Add `PermitRootLogin no` and the three lists to the same drop-in file as Fix 12, `/etc/ssh/sshd_config.d/10-stig.conf`. Use the **exact lines from the STIG fix script** for those rules. Do not copy the description text on the report: the scanner compares the setting against one exact ordered list, so the same methods in a different order, or text copied from the description, still fail.
+
+```bash
+sudo sshd -t && echo OK
+sudo systemctl restart ssh
+```
+- Keep one SSH session open and test with a second one before closing the first.
+
+### Verify
+- `sudo sshd -T | grep -Ei '^(permitrootlogin|ciphers|macs|kexalgorithms)'` shows `permitrootlogin no` and the three lists.
+- After the rescan, every SSH-related rule passed.
+
+---
+
+## Fix 19: Audit rules for privileged commands (19 rules)
+
+**Rules:** the audit rules for running `apparmor_parser`, `chage`, `chfn`, `chsh`, `crontab`, `gpasswd`, `kmod`, `mount`, `newgrp`, `pam_timestamp_check`, `passwd`, `su`, `sudo`, `sudoedit`, `umount`, `unix_update` and `usermod`, plus the `fdisk` and `modprobe` watches
+
+### The finding
+None of these commands were logged. They change accounts, passwords, mounts and kernel modules.
+
+### Why it matters
+These are the tools an attacker (or a mistake) would use to gain or change access. The log should show who ran them.
+
+### The fix
+Write one rule per command in `/etc/audit/rules.d/stig-privileged.rules`. Each of the 17 execution rules has the same shape, so look up the real path first:
+
+```bash
+command -v apparmor_parser chage chfn chsh crontab gpasswd kmod mount newgrp pam_timestamp_check passwd su sudo sudoedit umount unix_update usermod
+```
+- On Ubuntu 24.04, `/sbin` and `/bin` are links to `/usr/sbin` and `/usr/bin`. Use the path `command -v` prints for your system.
+
+One line per command, with the real path in place of the example:
+```
+-a always,exit -F path=/usr/bin/passwd -F perm=x -F auid>=1000 -F auid!=unset -k privileged
+```
+The two extra rules are watches on a program file:
+```
+-w /sbin/fdisk -p x -k fdisk
+-w /sbin/modprobe -p x -k modules
+```
+
+```bash
+sudo chmod 0600 /etc/audit/rules.d/stig-privileged.rules
+sudo augenrules --load
+sudo auditctl -l | wc -l
+```
+
+### Verify
+- `sudo auditctl -l | wc -l` goes up by the number of rules you added.
+- `sudo auditctl -l | grep -c privileged` shows 17 lines for this file's execution rules.
+
+---
+
+## Fix 20: Audit watches on account, log and cron files (15 rules)
+
+### The finding
+Changes to account files, login records and cron folders were not logged.
+
+### Why it matters
+A new user, a changed password, a new sudo rule, a cleared login record or a new scheduled job are all classic signs of someone taking over a system.
+
+### The fix
+`-w <path> -p wa` means "log any write or attribute change to this path." Put these in `/etc/audit/rules.d/stig-watches.rules`, each followed by a label (`-k`) of your choice:
+
+- `/etc/group`, `/etc/gshadow`, `/etc/security/opasswd`, `/etc/passwd`, `/etc/shadow`
+- `/etc/sudoers`, `/etc/sudoers.d/`
+- `/var/log/faillog`, `/var/log/lastlog`, `/var/log/btmp`, `/var/run/utmp`, `/var/log/wtmp`
+- `/etc/cron.d/`, `/var/spool/cron`, `/var/log/journal/`
+
+Example line:
+```
+-w /etc/shadow -p wa -k usergroup_modification
+```
+
+```bash
+sudo chmod 0600 /etc/audit/rules.d/stig-watches.rules
+sudo augenrules --load
+sudo auditctl -l | grep -c -- '-p wa'
+```
+
+### Verify
+- The last command prints 15 for this file's watches (plus any `-p wa` rules you already had).
+
+---
+
+## Fix 21: Audit rules for system calls (permissions, deletes, failed access, modules, privilege)
+
+### The finding
+The STIG wants the kernel's own actions logged, not just file paths. These are "system calls": the requests a program makes to the kernel.
+
+### Why it matters
+Changing file permissions or owners, deleting files, being refused access to a file, loading kernel modules and running programs with someone else's privileges are all things an investigator needs to see.
+
+### The fix
+Put these rules in `/etc/audit/rules.d/stig-syscalls.rules`. Each group needs one line for 64-bit programs (`-F arch=b64`) and one for 32-bit programs (`-F arch=b32`):
+
+- permission and ownership changes (`chmod`, `chown` and their variants)
+- extended attribute changes (`setxattr` and its variants)
+- deletes and renames (`unlink`, `rename` and their variants)
+- failed file access (`open`, `creat`, `truncate` and their variants with `-F exit=-EACCES` or `-F exit=-EPERM`)
+- kernel module loading and unloading (`init_module`, `finit_module`, `delete_module`)
+- the `chacl`, `setfacl` and `chcon` programs
+- programs that run with a different user or group than the caller (`execve` with `-C uid!=euid` or `-C gid!=egid`), and programs running as root (`-F euid=0`, `-F egid=0`)
+
+Example, 64-bit permission changes:
+```
+-a always,exit -F arch=b64 -S chmod,fchmod,fchmodat -F auid>=1000 -F auid!=unset -k perm_mod
+```
+
+```bash
+sudo chmod 0600 /etc/audit/rules.d/stig-syscalls.rules
+sudo augenrules --load
+sudo auditctl -l | wc -l
+```
+
+### The extended attribute rules need two lines each
+The permission-change rules for extended attributes passed for regular users only after I added a second copy of each line with `-F auid=0` instead of `-F auid>=1000 -F auid!=unset`. The STIG wants both: regular users and root.
+
+### Verify
+- Fixes 19 to 21 add 59 audit rules across the three files `stig-privileged.rules`, `stig-watches.rules` and `stig-syscalls.rules`.
+- Rescan after this step: **72.15%**, 157 passed, 57 failed.
+
+---
+
+## Fix 22: Password quality, password age and session limits
+
+**Rules:** the password quality rules (`pwquality`), `accounts_maximum_age_login_defs`, `accounts_minimum_age_login_defs`, `accounts_umask_etc_login_defs`, `accounts_max_concurrent_login_sessions`
+
+### The finding
+`pam_pwquality` was installed (Fix 8) but not configured, and the password age, default file permissions and login limits were at Ubuntu defaults.
+
+### Why it matters
+Longer and more varied passwords are harder to guess. Password age limits force a change. A `077` umask means new files are private by default. A login limit stops one account from opening unlimited sessions.
+
+### Safety first
+These change login behavior. Keep one SSH session open while you test, and keep the VM console available.
+
+### The fix
+```bash
+sudo apt install -y libpam-pwquality
+```
+Then set these values in `/etc/security/pwquality.conf` (remove the `#` if the line is commented out):
+```
+minlen = 15
+dcredit = -1
+ucredit = -1
+lcredit = -1
+ocredit = -1
+difok = 8
+dictcheck = 1
+enforcing = 1
+```
+- `minlen = 15`: at least 15 characters.
+- `dcredit`, `ucredit`, `lcredit`, `ocredit` at `-1`: at least one digit, one uppercase letter, one lowercase letter and one symbol.
+- `difok = 8`: a new password must differ from the old one by at least 8 characters.
+- `dictcheck = 1` rejects dictionary words. `enforcing = 1` applies the rules to everyone, including root.
+
+In `/etc/login.defs`, set:
+```
+PASS_MAX_DAYS 60
+PASS_MIN_DAYS 1
+UMASK 077
+```
+
+```bash
+echo '* hard maxlogins 10' | sudo tee /etc/security/limits.d/stig-maxlogins.conf
+```
+
+### Verify
+- `grep -E '^(minlen|dcredit|ucredit|lcredit|ocredit|difok|dictcheck|enforcing)' /etc/security/pwquality.conf` shows all eight lines.
+- `grep -E '^(PASS_MAX_DAYS|PASS_MIN_DAYS|UMASK)' /etc/login.defs` shows the three values.
+- `cat /etc/security/limits.d/stig-maxlogins.conf` shows `* hard maxlogins 10`.
+
+### Lesson learned: `UMASK 077` makes files created by root private
+After this change, a scan report written by `sudo oscap ...` is readable by root only, so `scp` from my computer fails with "Permission denied." On the VM, run `sudo chown <user>:<user> ~/report-<name>.html` first, then copy it.
+
+---
+
+## Fix 23: Audit daemon settings and audit log permissions
+
+**Rules:** the `auditd` log group, free-space warning and action rules, and the audit log file permission rules
+
+### The finding
+`/etc/audit/auditd.conf` used the default log group and free-space settings, and the audit log files could be read by more people than the STIG allows.
+
+### Why it matters
+The audit log is the record of what happened. It should be private, and the system should warn an administrator before the disk fills up and logging stops.
+
+### The fix
+In `/etc/audit/auditd.conf`, set:
+```
+log_group = root
+space_left = 25%
+space_left_action = email
+```
+
+```bash
+sudo chgrp root /var/log/audit/*
+sudo chmod 0600 /var/log/audit/*
+sudo service auditd restart
+```
+- `service auditd restart` is used because `systemctl restart auditd` is refused on some systems.
+
+### Verify
+- `sudo ls -l /var/log/audit/` shows `-rw-------` and group `root` on each log file.
+
+### Regression found after the 75.3% scan: the directory itself
+With `log_group = root`, the rule `directory_permissions_var_log_audit` wants the **folder** `/var/log/audit` at `0700`. It was at `0750`, so a rule that passed before the change failed after it.
+
+```bash
+sudo chmod 0700 /var/log/audit
+sudo ls -ld /var/log/audit
+```
+- Expected: `drwx------`.
+- I have **not** rescanned since this fix, so the 75.3% score below does not include it.
+
+---
+
+## Rescans on November 3, 2026
+
+| Time (Mountain) | Weighted score | Passed | Failed | What changed |
+|---|---|---|---|---|
+| About 5:07 PM | 68.74% | 98 | 116 | Fixes 17 and 18 (ssh-agent and ssh-keysign audit rules; every SSH rule now passes) |
+| About 5:34 PM | 72.15% | 157 | 57 | Fixes 19 to 21: 59 audit rules in total |
+| About 5:54 PM | **75.3%** | 178 | 36 | Fixes 22 and 23 and the extended attribute follow-up: 23 rules newly passing, 1 rule regressed |
+
+Two earlier full scans on November 2 scored 68.73% (96 passed) and then 67.95% (97 passed).
+
+Why the score does not rise one-for-one: it is weighted, so each rule counts for a different amount. The step from 98 to 157 passed rules (59 more) moved the score by 3.4 points, while the next 21 passed rules added 3.2 points.
+
+---
+
+## Lessons learned on November 3
+
+- Every file in `/etc/audit/rules.d/` must be `0600`. `0640` fails the earlier rules.d permission rule.
+- Extended attribute audit rules need two lines each: one for regular users (`auid>=1000`) and one for root (`auid=0`).
+- The scanner wants the exact, ordered SSH encryption lists from the STIG fix script, not the text in the rule description.
+- The weighted score does not rise one-for-one with rules passed.
+- With `UMASK 077`, files root creates (including scan reports) are root-only. `chown` them before `scp`.
+- A fix can break a rule that already passed. Compare two scans rule by rule (for example, with a short script that reads the two HTML reports) instead of only reading the score.
+- The audit immutable rule (`-e 2`) goes last. It locks the audit rules until the next reboot, so any later change to them needs a restart.
+
+## Next up: the 36 rules still failing (as of the 75.3% scan)
+
+- **File integrity (AIDE):** build the database, protect the audit tools, turn off silent reports
+- **FIPS mode** (a U.S. government encryption standard)
+- **sudo:** the "NOPASSWD" and "require authentication" rules
+- **Updates:** clean up old components after updating
+- **Passwords:** a delay after a failed login (faildelay), password hashing and rounds, no empty passwords, disable accounts after the password expires
+- **Smart card login:** 7 rules, probably documented as an accepted risk on a home lab
+- **Boot loader:** a grub2 password, and the audit setting on the boot line
+- **Logging:** rsyslog remote monitoring, journal folder permissions, `/var/log` file permissions, system library ownership
+- **Time sync (chrony):** 4 rules
+- **Audit, last:** the immutable rule, sudo log events, and a remote audit server with log offload
+- Rescan after the `/var/log/audit` fix above.
+
+---
+
 ## Score history (weighted)
 
-| After | oscap score |
-|---|---|
-| Baseline | 51.38% |
-| Fix 6 | 60.03% |
-| Fix 10 | 61.22% |
-| Fix 11 | 62.02% |
-| Fix 16 | 68.60% |
+| After | oscap score | Passed | Failed | Notes |
+|---|---|---|---|---|
+| Baseline | 51.38% | 54 | 65 | 45% pass rate on applicable rules |
+| Fix 6 | 60.03% | not recorded | not recorded | |
+| Fix 10 | 61.22% | not recorded | not recorded | |
+| Fix 11 | 62.02% | not recorded | not recorded | |
+| Fix 16 | 68.60% | not recorded | not recorded | |
+| Nov 2, full scan | 68.73% | 96 | not recorded | |
+| Nov 2, later scan | 67.95% | 97 | not recorded | slightly lower: see the note below |
+| Nov 3, about 5:07 PM | 68.74% | 98 | 116 | Fixes 17 and 18 |
+| Nov 3, about 5:34 PM | 72.15% | 157 | 57 | Fixes 19 to 21 |
+| Nov 3, about 5:54 PM | 75.3% | 178 | 36 | Fixes 22 and 23 |
 
-Package-install rules are low weight, so the score moves slowly. Fixes 12 to 16 (SSH settings, kernel settings, firewall, time sync, log permissions) added about 6.6 points in one session. The bigger remaining gains are in the password, faillock, and AIDE rules.
+The score went down a little between the two November 2 scans (68.73% to 67.95%) even though one more rule passed. I did not compare the two reports rule by rule, so I do not know which rule caused it. I report it as it happened.
+
+Package-install rules are low weight, so the score moves slowly. Fixes 12 to 16 (SSH settings, kernel settings, firewall, time sync, log permissions) added about 6.6 points in one session. After Fix 23, the remaining gains are in the AIDE, boot loader, time sync and logging rules (see "Next up" above).
 
 Full rescan command (from `~/scap-security-guide-0.1.82`):
 - `sudo oscap xccdf eval --profile $P --results ~/results-fixN.xml --report ~/report-fixN.html ssg-ubuntu2404-ds.xml`
