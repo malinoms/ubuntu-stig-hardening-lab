@@ -1,6 +1,6 @@
 # Ubuntu 24.04 STIG Hardening Runbook
 
-How to use this: work through each finding in order. Run the commands on the target server, then run the verify step. Every finding is tied to the rule title in the OpenSCAP report. This runbook covers Fixes 1 to 23.
+How to use this: work through each finding in order. Run the commands on the target server, then run the verify step. Every finding is tied to the rule title in the OpenSCAP report. This runbook covers Fixes 1 to 28.
 
 Placeholders used below: `<vmid>` is the Proxmox VM ID of the lab VM, `<user>` is the admin account on the lab VM, `<proxmox-host>` and `<lab-vm>` are addresses, and `~/.ssh/<lab-key>` is the SSH key used for the lab.
 
@@ -748,7 +748,7 @@ sudo chmod 0700 /var/log/audit
 sudo ls -ld /var/log/audit
 ```
 - Expected: `drwx------`.
-- I have **not** rescanned since this fix, so the 75.3% score below does not include it.
+- A November 11 rescan around 9:25 PM Mountain confirmed this change: 35 rules failed, down from 36 on the 75.3% scan. I did not record the weighted score or the pass count for that first November 11 scan.
 
 ---
 
@@ -776,19 +776,298 @@ Why the score does not rise one-for-one: it is weighted, so each rule counts for
 - A fix can break a rule that already passed. Compare two scans rule by rule (for example, with a short script that reads the two HTML reports) instead of only reading the score.
 - The audit immutable rule (`-e 2`) goes last. It locks the audit rules until the next reboot, so any later change to them needs a restart.
 
-## Next up: the 36 rules still failing (as of the 75.3% scan)
+## Opening the November 11, 2026 session
 
-- **File integrity (AIDE):** build the database, protect the audit tools, turn off silent reports
-- **FIPS mode** (a U.S. government encryption standard)
-- **sudo:** the "NOPASSWD" and "require authentication" rules
-- **Updates:** clean up old components after updating
-- **Passwords:** a delay after a failed login (faildelay), password hashing and rounds, no empty passwords, disable accounts after the password expires
-- **Smart card login:** 7 rules, probably documented as an accepted risk on a home lab
-- **Boot loader:** a grub2 password, and the audit setting on the boot line
-- **Logging:** rsyslog remote monitoring, journal folder permissions, `/var/log` file permissions, system library ownership
-- **Time sync (chrony):** 4 rules
-- **Audit, last:** the immutable rule, sudo log events, and a remote audit server with log offload
-- Rescan after the `/var/log/audit` fix above.
+The `/var/log/audit` permission fix from Fix 23 had not been rescanned. After starting the VM and taking a snapshot, I ran a full profile scan around 9:25 PM Mountain:
+
+```bash
+cd ~/scap-security-guide-0.1.82
+sudo oscap xccdf eval --profile xccdf_org.ssgproject.content_profile_stig --results ~/results-nov11.xml --report ~/report-nov11.html ssg-ubuntu2404-ds.xml
+```
+
+oscap prints pass or fail for each rule, but not the overall score. To list the failing rule names, and later to read the score and the result counts:
+
+```bash
+sudo python3 -c "import re,sys;d=open(sys.argv[1]).read();print('\n'.join(sorted(set(re.findall(r'content_rule_([^\"]+)\"[^>]*>\s*<result>fail',d)))))" ~/results-nov11.xml
+sudo grep -o '<score[^>]*>[^<]*' ~/results-nov11.xml
+sudo grep -o '<result>[a-z]*' ~/results-nov11.xml | sort | uniq -c
+```
+
+The first scan found 35 failing rules, down from 36. That confirmed the audit-folder fix had taken. I did not record the weighted score or the pass count for this scan.
+
+---
+
+## Fix 24: Password delay, hashing, empty passwords, and account expiration
+
+**Rules:** `account_disable_post_pw_expiration`, `accounts_passwords_pam_faildelay_delay`, `no_empty_passwords`, `accounts_password_pam_unix_rounds_password_auth`, `set_password_hashing_algorithm_auth_stig`
+
+### The finding
+
+Accounts stayed usable after the password expired, a failed login had no delay, empty passwords were still allowed in PAM, and password hashing was not at the STIG values.
+
+### Why it matters
+
+A short delay after a bad password slows guessing. Stronger hashing (SHA-512 with 100000 rounds) makes stolen password files harder to crack. Removing empty-password logins closes a bypass. Disabling an account 35 days after the password expires limits how long a stale account can be used.
+
+### Safety first
+
+These change login settings. Take a snapshot first: `qm snapshot <vmid> <snapshot-name>`. Keep the current SSH session open the whole time. Test a fresh login and `sudo -v` from a **second** window before you close anything.
+
+### The fix
+
+I let the scanner apply its own fixes, including the package-cleanup rule in Fix 25, in one command. From `~/scap-security-guide-0.1.82`:
+
+```bash
+sudo oscap xccdf eval --remediate --profile xccdf_org.ssgproject.content_profile_stig \
+ --rule xccdf_org.ssgproject.content_rule_account_disable_post_pw_expiration \
+ --rule xccdf_org.ssgproject.content_rule_accounts_passwords_pam_faildelay_delay \
+ --rule xccdf_org.ssgproject.content_rule_no_empty_passwords \
+ --rule xccdf_org.ssgproject.content_rule_accounts_password_pam_unix_rounds_password_auth \
+ --rule xccdf_org.ssgproject.content_rule_set_password_hashing_algorithm_auth_stig \
+ --rule xccdf_org.ssgproject.content_rule_clean_components_post_updating \
+ --results ~/results-batchA.xml ssg-ubuntu2404-ds.xml
+```
+
+What the scanner set:
+
+- `INACTIVE=35` in `/etc/default/useradd` (disable the account 35 days after the password expires)
+- a 4-second delay after a failed password (`pam_faildelay` `delay=4000000`, configured through `pam-auth-update`)
+- `nullok` removed, so empty passwords are not accepted
+- `rounds=100000` and SHA-512 for password hashing
+
+### Verify
+
+- In a **second** window, open a new SSH session and run `sudo -v`. If both work, the login path is still safe.
+- A later full rescan (after Fix 26) showed these five rules had passed.
+
+---
+
+## Fix 25: Clean unused packages after updates
+
+**Rule:** `clean_components_post_updating`
+
+### The finding
+
+Unused packages and old kernels could be left behind after updates.
+
+### Why it matters
+
+Leftover packages add attack surface and clutter. The STIG wants unattended upgrades to remove unused dependencies and kernels.
+
+### The fix
+
+Applied in the same `--remediate` command as Fix 24. The scanner configured unattended-upgrades to remove unused dependencies and kernels.
+
+### Verify
+
+Confirmed on the same later full rescan as Fix 24.
+
+---
+
+## Fix 26: Chrony time servers
+
+**Rules:** `chronyd_server_directive`, `chronyd_or_ntpd_set_maxpoll`, `chronyd_sync_clock`. `chronyd_specify_remote_server` stays failed, as a documented exception.
+
+### The finding
+
+Fix 15 installed chrony and removed timesyncd, but the time-server settings still failed. The STIG wants `server` lines (not Ubuntu's default `pool` lines), `makestep 1 -1`, and `maxpoll 16`. It also wants one specific military time server.
+
+### Why it matters
+
+Accurate, consistent time matters for audit logs, log correlation and certificate checks. A clock with no source is worse than a clock synced to a public server.
+
+### Safety first
+
+This does not touch SSH. Take a snapshot anyway if you do not already have one from the start of the session.
+
+### The fix
+
+I first pointed chrony at the STIG's required server, `0.us.pool.ntp.mil`, commented out the `pool` lines, and set `makestep 1 -1`. That name did not resolve from the home network (`getent hosts 0.us.pool.ntp.mil` printed nothing). `chronyc sources` showed no sources at all, so the clock was unsynced.
+
+I then switched to public NIST servers, which still satisfy three of the four time-sync rules. On a stock chrony config (pool lines, and no leftover `.mil` line), this is enough:
+
+```bash
+sudo sed -i 's/^pool /#pool /; s/^makestep.*/makestep 1 -1/' /etc/chrony/chrony.conf
+echo "server time.nist.gov iburst maxpoll 16" | sudo tee -a /etc/chrony/chrony.conf
+echo "server time-a-g.nist.gov iburst maxpoll 16" | sudo tee -a /etc/chrony/chrony.conf
+sudo systemctl restart chrony && sleep 20 && chronyc sources
+```
+
+If a leftover `server 0.us.pool.ntp.mil` line is still in the file, replace or delete it first so the clock is not pointed at an unreachable host:
+
+```bash
+sudo sed -i 's/^server 0.us.pool.ntp.mil.*/server time.nist.gov iburst maxpoll 16/' /etc/chrony/chrony.conf
+```
+
+The important check is `chronyc sources`.
+
+### Verify
+
+`chronyc sources` showed:
+
+- `^- time-a-wwv.nist.gov` (what `time.nist.gov` resolved to), stratum 1
+- `^* time-a-g.nist.gov`, stratum 1, meaning chrony was locked onto that server
+
+The later full rescan passed `chronyd_server_directive`, `chronyd_or_ntpd_set_maxpoll` and `chronyd_sync_clock`. `chronyd_specify_remote_server` still failed, because the scanner only accepts that exact `.mil` server. That rule is a documented exception: the required server is not reachable outside government networks.
+
+### Lesson learned
+
+Verify a fix actually works, not just that the scanner would pass. An unreachable time server would have left the clock with no source. Check name resolution (`getent hosts`) and look for `^*` or `^+` in `chronyc sources` before you move on.
+
+---
+
+## Rescan after Fixes 24 to 26: 79.15%
+
+```bash
+sudo oscap xccdf eval --profile xccdf_org.ssgproject.content_profile_stig --results ~/results-nov11b.xml --report ~/report-nov11b.html ssg-ubuntu2404-ds.xml
+sudo grep -o '<score[^>]*>[^<]*' ~/results-nov11b.xml
+sudo grep -o '<result>[a-z]*' ~/results-nov11b.xml | sort | uniq -c
+```
+
+Weighted score **79.15%** (raw score 79.151375): 188 passed, 26 failed, 20 not applicable. That is 9 of the 10 rules in this batch. The tenth is the military time-server exception.
+
+---
+
+## Fix 27: Packages, log and library permissions, AIDE, and audit at boot
+
+**Rules:** `package_audit-audispd-plugins_installed`, `package_nss_sss_installed`, `package_pam_sss_installed`, `dir_permissions_system_journal`, `file_permissions_var_log_stig`, `root_permissions_syslibrary_files`, `aide_check_audit_tools`, `aide_disable_silentreports`, `aide_build_database`, `grub2_audit_argument`
+
+### The finding
+
+Three packages were missing, some log and library permissions had failed again or had never fully passed, AIDE (the file integrity checker) was not set up, and audit was not enabled from the moment the system boots.
+
+### Why it matters
+
+AIDE notices when important files change. Tight log and library permissions protect the evidence and the system libraries. The audit boot argument means audit starts before user space, so early events are not missed. The extra packages are what later smart-card and directory-service rules expect.
+
+### Safety first
+
+These are low-risk compared with sudo or a boot-loader password, but one of the packages touches login settings. Take a snapshot first. Keep the current SSH session open and test a fresh login and `sudo -v` in a second window before you reboot.
+
+### The fix
+
+From `~/scap-security-guide-0.1.82`, let the scanner apply its own fixes:
+
+```bash
+sudo oscap xccdf eval --remediate --profile xccdf_org.ssgproject.content_profile_stig \
+ --rule xccdf_org.ssgproject.content_rule_package_audit-audispd-plugins_installed \
+ --rule xccdf_org.ssgproject.content_rule_package_nss_sss_installed \
+ --rule xccdf_org.ssgproject.content_rule_package_pam_sss_installed \
+ --rule xccdf_org.ssgproject.content_rule_dir_permissions_system_journal \
+ --rule xccdf_org.ssgproject.content_rule_file_permissions_var_log_stig \
+ --rule xccdf_org.ssgproject.content_rule_root_permissions_syslibrary_files \
+ --rule xccdf_org.ssgproject.content_rule_aide_check_audit_tools \
+ --rule xccdf_org.ssgproject.content_rule_aide_disable_silentreports \
+ --rule xccdf_org.ssgproject.content_rule_aide_build_database \
+ --rule xccdf_org.ssgproject.content_rule_grub2_audit_argument \
+ --results ~/results-batchC.xml ssg-ubuntu2404-ds.xml
+```
+
+The scanner first reports `fail` for each rule, then "Starting Remediation." Building the AIDE database can take 5 to 10 minutes with no output. Let it finish. The `grub2_audit_argument` change only takes effect after a reboot.
+
+### Verify
+
+- Test `sudo -v` from a fresh window, then `sudo reboot`, and reconnect.
+- Full rescan after the reboot (below).
+
+### Lesson learned
+
+Installing the SSSD packages (`package_nss_sss_installed` and `package_pam_sss_installed`) made 7 previously not-applicable rules start to apply. Those are the SSSD configuration rules that expect a smart card or a company directory. The packages themselves are required, but the fail count will not drop as far as the pass count rises.
+
+---
+
+## Rescan after Fix 27: 85.87%
+
+```bash
+sudo oscap xccdf eval --profile xccdf_org.ssgproject.content_profile_stig --results ~/results-nov11c.xml --report ~/report-nov11c.html ssg-ubuntu2404-ds.xml
+sudo grep -o '<score[^>]*>[^<]*' ~/results-nov11c.xml
+sudo grep -o '<result>[a-z]*' ~/results-nov11c.xml | sort | uniq -c
+```
+
+Weighted score **85.87%** (raw score 85.873016): 198 passed, 23 failed, 13 not applicable. Passes went up by 10, but failures only dropped by 3, because not-applicable went from 20 to 13.
+
+---
+
+## Fix 28: Log file permissions after reboot, and sudo audit events
+
+**Rules:** `file_permissions_var_log_stig`, `audit_sudo_log_events`
+
+### The finding
+
+`file_permissions_var_log_stig` failed again after the Fix 27 reboot, when the system created new log files. Attempts to perform maintenance with sudo were also not being recorded.
+
+### Why it matters
+
+New log files can be created more open than the STIG allows, so a permission fix does not always last across a reboot. Logging sudo use records who ran privileged commands.
+
+### Safety first
+
+Low risk. Keep the current SSH session open anyway.
+
+### The fix
+
+```bash
+sudo oscap xccdf eval --remediate --profile xccdf_org.ssgproject.content_profile_stig \
+ --rule xccdf_org.ssgproject.content_rule_file_permissions_var_log_stig \
+ --rule xccdf_org.ssgproject.content_rule_audit_sudo_log_events \
+ --results ~/results-batchD.xml ssg-ubuntu2404-ds.xml
+```
+
+Expected: `Result fixed` for both rules.
+
+### Verify
+
+A list of failing rules taken from the older `~/results-nov11c.xml` file will still show these two names. Rescan to a new file:
+
+```bash
+sudo oscap xccdf eval --profile xccdf_org.ssgproject.content_profile_stig --results ~/results-nov11d.xml --report ~/report-nov11d.html ssg-ubuntu2404-ds.xml
+sudo grep -o '<score[^>]*>[^<]*' ~/results-nov11d.xml
+```
+
+---
+
+## Rescans on November 11, 2026
+
+All times are Mountain.
+
+| Time (Mountain) | Weighted score | Passed | Failed | What changed |
+|---|---|---|---|---|
+| About 9:25 PM | not recorded | not recorded | 35 | Confirmed the Fix 23 `/var/log/audit` permission change |
+| After Fixes 24 to 26 | **79.15%** | 188 | 26 | Password, package-cleanup and chrony rules. The military time-server rule still failed, by design |
+| After Fix 27 and a reboot | **85.87%** | 198 | 23 | Packages, log and library permissions, AIDE, and audit at boot. 10 more passed, but only 3 fewer failed |
+| About 9:48 PM, after Fix 28 | **86.43%** | not recorded | 21 | Log permissions re-applied after the reboot, and sudo use now logged. Raw score 86.428566 |
+
+The session started at 75.3% (178 passed, 36 failed) from November 3 and ended at 86.43%. I did not capture the exact pass count for the final scan, so I do not claim one.
+
+---
+
+## Lessons learned on November 11
+
+- Verify a fix actually works, not just that the scanner would pass. An unreachable time server left the clock with no source until I switched to NIST and confirmed `^*` in `chronyc sources`.
+- Installing packages can make previously not-applicable rules start to apply. After Fix 27, 10 more rules passed but only 3 fewer failed, because not-applicable dropped from 20 to 13.
+- `/var/log` permission fixes can fail again after a reboot, when the system creates new log files. Rescan after the reboot, and be ready to re-apply the rule.
+- oscap does not print the overall score to the terminal. Read it from the results file (`grep` for `<score`), and use a new results file when you list remaining failures, or you will see stale names from an older scan.
+- Keep a safety SSH session open and test a fresh login plus `sudo -v` whenever a batch touches login settings.
+
+## Next up: the 21 rules still failing (as of the 86.43% scan)
+
+"Done" means every remaining rule either passes or is written up as an accepted exception with a reason.
+
+**Planned exceptions (13 rules):**
+
+- **Smart card login:** `install_smartcard_packages`, `smartcard_configure_ca`, `smartcard_configure_cert_checking`, `smartcard_configure_crl`, `smartcard_pam_enabled`
+- **SSSD** (the service that links logins to a smart card or a company directory, which a standalone home lab does not have): `service_sssd_enabled`, `sssd_certification_path_trust_anchor`, `sssd_enable_pam_services`, `sssd_enable_smartcards`, `sssd_enable_user_cert`, `sssd_offline_cred_expiration`
+- **FIPS mode:** `is_fips_mode_enabled`
+- **Military time server:** `chronyd_specify_remote_server` (see Fix 26)
+
+**Real fixes still to do (8 rules):**
+
+- **Boot loader password** (next session, lockout risk, snapshot first): `grub2_password`, `grub2_uefi_password`
+- **sudo authentication** (next session, lockout risk, snapshot first): `sudo_remove_nopasswd`, `sudo_require_authentication`
+- **Remote logging and audit offload** (need a log receiver, possibly a small container): `rsyslog_remote_access_monitoring`, `auditd_audispd_configure_remote_server`, `auditd_offload_logs`
+- **Audit, last:** `audit_rules_immutable`
+
+After those, automate the confirmed fixes with Ansible.
 
 ---
 
@@ -806,10 +1085,14 @@ Why the score does not rise one-for-one: it is weighted, so each rule counts for
 | Nov 3, about 5:07 PM | 68.74% | 98 | 116 | Fixes 17 and 18 |
 | Nov 3, about 5:34 PM | 72.15% | 157 | 57 | Fixes 19 to 21 |
 | Nov 3, about 5:54 PM | 75.3% | 178 | 36 | Fixes 22 and 23 |
+| Nov 11, about 9:25 PM | not recorded | not recorded | 35 | Confirmed the Fix 23 audit-folder permission change |
+| Nov 11, after Fixes 24 to 26 | 79.15% | 188 | 26 | Password, package-cleanup and chrony rules |
+| Nov 11, after Fix 27 and a reboot | 85.87% | 198 | 23 | Packages, permissions, AIDE, audit at boot |
+| Nov 11, about 9:48 PM, after Fix 28 | 86.43% | not recorded | 21 | Log permissions re-applied, sudo use logged |
 
 The score went down a little between the two November 2 scans (68.73% to 67.95%) even though one more rule passed. I did not compare the two reports rule by rule, so I do not know which rule caused it. I report it as it happened.
 
-Package-install rules are low weight, so the score moves slowly. Fixes 12 to 16 (SSH settings, kernel settings, firewall, time sync, log permissions) added about 6.6 points in one session. After Fix 23, the remaining gains are in the AIDE, boot loader, time sync and logging rules (see "Next up" above).
+Package-install rules are low weight, so the score moves slowly. Fixes 12 to 16 (SSH settings, kernel settings, firewall, time sync, log permissions) added about 6.6 points in one session. The November 11 session (Fixes 24 to 28) moved the weighted score from 75.3% to 86.43%. Remaining real fixes are the boot loader password, sudo authentication, remote logging, and the audit immutable rule last (see "Next up" above).
 
 Full rescan command (from `~/scap-security-guide-0.1.82`):
 - `sudo oscap xccdf eval --profile $P --results ~/results-fixN.xml --report ~/report-fixN.html ssg-ubuntu2404-ds.xml`

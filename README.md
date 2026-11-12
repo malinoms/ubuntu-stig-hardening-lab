@@ -15,10 +15,14 @@ I took a fresh Ubuntu 24.04 server and hardened it against the DISA STIG using O
 | Nov 3, about 5:07 PM | 98 passed, 116 failed | 68.74% |
 | Nov 3, about 5:34 PM | 157 passed, 57 failed | 72.15% |
 | Nov 3, about 5:54 PM | 178 passed, 36 failed | 75.3% |
+| Nov 11, about 9:25 PM | 35 failed (pass count not recorded) | not recorded |
+| Nov 11, after Fixes 24 to 26 | 188 passed, 26 failed | 79.15% |
+| Nov 11, after Fix 27 and a reboot | 198 passed, 23 failed | 85.87% |
+| Nov 11, about 9:48 PM, after Fix 28 | 21 failed (pass count not recorded) | 86.43% |
 
-The oscap score went from **51.38% to 75.3%** across twenty-three fixes. The baseline pass rate and the oscap score are measured differently, and I only kept the pass rate for the baseline. The 75.3% scan was taken before one last permission fix (`/var/log/audit`, see Fix 23), so I have not rescanned that yet. Details are in [results/summary.md](results/summary.md).
+The oscap score went from **51.38% to 86.43%** across twenty-eight fixes, and the work is still in progress. The baseline pass rate and the oscap score are measured differently, and I only kept the pass rate for the baseline. A November 11 rescan around 9:25 PM Mountain confirmed that the `/var/log/audit` permission fix from Fix 23 had taken (35 rules failing, down from 36). I did not record the pass count or the weighted score for that first November 11 scan. The latest scan, around 9:48 PM Mountain, scored **86.43%** weighted (raw score 86.428566, 21 rules failed). I did not capture the exact pass count for that final scan, so I do not claim one. Details are in [results/summary.md](results/summary.md).
 
-## The twenty-three fixes
+## The twenty-eight fixes
 
 Rule IDs are shown without the `xccdf_org.ssgproject.content_rule_` prefix.
 
@@ -47,6 +51,11 @@ Rule IDs are shown without the `xccdf_org.ssgproject.content_rule_` prefix.
 | 21 | Audit rules for system calls: permission changes, deletes, failed access, kernel modules, privilege use | the system-call audit rules |
 | 22 | Password quality, password age, default file permissions (`UMASK 077`) and a limit of 10 logins | `pwquality` rules, `accounts_maximum_age_login_defs`, `accounts_minimum_age_login_defs`, `accounts_umask_etc_login_defs`, `accounts_max_concurrent_login_sessions` |
 | 23 | Audit daemon log group and free-space settings, and private audit logs | the `auditd.conf` and audit log permission rules |
+| 24 | Password delay, hashing, no empty passwords, and disable accounts after the password expires | `account_disable_post_pw_expiration`, `accounts_passwords_pam_faildelay_delay`, `no_empty_passwords`, `accounts_password_pam_unix_rounds_password_auth`, `set_password_hashing_algorithm_auth_stig` |
+| 25 | Clean unused packages after updates | `clean_components_post_updating` |
+| 26 | Point chrony at reachable time servers, with maxpoll 16 | `chronyd_server_directive`, `chronyd_or_ntpd_set_maxpoll`, `chronyd_sync_clock` |
+| 27 | Install remaining packages, tighten log and library permissions, set up AIDE, and turn on audit at boot | `package_audit-audispd-plugins_installed`, `package_nss_sss_installed`, `package_pam_sss_installed`, `dir_permissions_system_journal`, `file_permissions_var_log_stig`, `root_permissions_syslibrary_files`, `aide_check_audit_tools`, `aide_disable_silentreports`, `aide_build_database`, `grub2_audit_argument` |
+| 28 | Re-apply log file permissions after reboot, and log sudo use | `file_permissions_var_log_stig`, `audit_sudo_log_events` |
 
 ## Method
 
@@ -56,7 +65,7 @@ For each finding:
 2. Check the current state by hand so I understand the finding.
 3. Fix only that rule: `sudo oscap xccdf eval --remediate --profile xccdf_org.ssgproject.content_profile_stig --rule <rule-id> ssg-ubuntu2404-ds.xml`
 4. Verify the change by hand, then rescan the single rule to confirm it passes.
-5. After a batch of fixes, run a full profile scan.
+5. After a batch of fixes, run a full profile scan. In later sessions I also applied a small group of related, low-risk rules in one `--remediate` command, still testing a fresh login and `sudo -v` in a second window before I closed the first.
 
 ## Key decisions
 
@@ -72,18 +81,20 @@ The commands are the easy part. These are the calls that mattered.
 
 **Verify every change by hand.** "No error" doesn't mean a change worked, so I check the actual system state after each fix and rescan the rule. For TMOUT, the old window still showed it blank, and only a new session showed `600`, because login settings apply to new sessions. I treat tool output and AI suggestions as inputs to check: an assistant's guesses on a rule name and on the timeout value were both wrong, and verifying against the system caught both.
 
-**Report the scores honestly.** OpenSCAP reports a weighted score, and the simple pass rate is a different number. The baseline was a 45% pass rate (54 of 119 applicable rules) but a 51.38% weighted score, and the latest scan scored 75.3% weighted (178 rules passed, 36 failed). I report the weighted scores side by side (51.38% to 75.3%) rather than quoting 45% to 75.3%, which would compare two different measures. I didn't record per-rule counts for the scans before November 3, so I don't claim any. The score also does not rise one-for-one with rules passed: 59 more rules passing moved it only 3.4 points.
+**Report the scores honestly.** OpenSCAP reports a weighted score, and the simple pass rate is a different number. The baseline was a 45% pass rate (54 of 119 applicable rules) but a 51.38% weighted score, and the latest scan scored 86.43% weighted (raw score 86.428566, 21 rules failed). I did not capture the exact pass count for that final scan, so I do not claim one. I report the weighted scores side by side (51.38% to 86.43%) rather than quoting 45% to 86.43%, which would compare two different measures. I didn't record per-rule counts for the scans before November 2, so I don't claim any. For the first November 11 rescan I recorded only the fail count (35 rules), not the pass count. The score also does not rise one-for-one with rules passed: 59 more rules passing moved it only 3.4 points. After Fix 27, 10 more rules passed but only 3 fewer failed, because installing the SSSD packages made 7 previously not-applicable rules start to apply.
 
 **Isolate the lab network from the home LAN.** The lab VMs needed internet for patches and tools, but I didn't want them reaching my home network. I chose NAT over copying files in by hand, allowed outbound traffic only, added an explicit rule dropping lab traffic to my home LAN, and keep deliberately vulnerable practice VMs powered off while NAT is on. That gave me patching without giving up segmentation.
 
 **Things that surprised me on November 3.** Files in `/etc/audit/rules.d/` must be `0600`; `0640` made an earlier rule fail again. The extended-attribute audit rules need one line for regular users and a second for root. With `UMASK 077`, scan reports created by root are root-only, so I `chown` them before copying them off the VM. The scanner wants the exact, ordered SSH encryption lists from the STIG fix script, not the text in the rule description. And one fix (`log_group = root`) quietly broke a rule that already passed, which I only caught by comparing two scans rule by rule. I save the audit "immutable" rule (`-e 2`) for last, because it locks the audit rules until the next reboot.
+
+**Things that surprised me on November 11.** The STIG time-server name did not resolve from the home network. Pointing chrony at that server and commenting out the working pool lines left the clock with no source. I switched to public NIST servers, confirmed the clock was actually in sync (`^*` in `chronyc sources`), and wrote up the `.mil` server rule as an accepted exception. The lesson: verify a fix actually works, not just that the scanner would pass. Installing the SSSD packages made 7 new rules apply, so the fail count dropped less than the pass count rose. And `/var/log` permission fixes can fail again after a reboot, when the system creates new log files.
 
 ## Repo layout
 
 ```
 .
 ├── README.md            this overview
-├── runbook.md           step-by-step commands and checks for Fixes 1 to 23
+├── runbook.md           step-by-step commands and checks for Fixes 1 to 28
 ├── lab-notes.md         my lab log, Steps 1 to 13, including mistakes and decisions
 └── results/
     └── summary.md       baseline counts, scores, and remaining failures
@@ -99,10 +110,13 @@ The raw OpenSCAP XML and HTML reports are not published because they contain hos
 
 ## Next steps
 
-- Rescan after the `/var/log/audit` permission fix.
-- Work through the 36 remaining findings: AIDE file integrity, sudo authentication, the password delay after a failed login, password hashing, the boot loader password, remote logging, chrony time sync, and the audit "immutable" rule last.
-- Write up (not fix) the smart-card, FIPS mode and remote audit server rules as accepted risk for a home lab.
-- Add a short write-up of what changed between scans.
+The lab is still in progress. "Done" means every remaining rule either passes or is written up as an accepted exception with a reason.
+
+- Next session: the boot loader password (`grub2_password`, `grub2_uefi_password`) and the sudo authentication rules (`sudo_remove_nopasswd`, `sudo_require_authentication`). These can lock you out, so take a snapshot first and keep a console path open.
+- After that: remote logging and audit offload (`rsyslog_remote_access_monitoring`, `auditd_audispd_configure_remote_server`, `auditd_offload_logs`). These need a second machine to receive the logs. A small container on the lab host is one option.
+- Last of the real fixes: the audit "immutable" rule (`audit_rules_immutable`). It locks the audit rules until the next reboot.
+- Write up the 13 planned exceptions: the 5 remaining smart-card rules, the 6 SSSD rules (SSSD is the service that links logins to a smart card or a company directory, which a standalone home lab does not have), FIPS mode, and the military time-server rule (`chronyd_specify_remote_server`). The scanner only accepts one exact `.mil` time server, which did not resolve from this home network.
+- Automate the confirmed fixes with Ansible.
 
 ## Disclaimer
 
