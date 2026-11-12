@@ -116,7 +116,7 @@ Rule IDs are shown without the `xccdf_org.ssgproject.content_rule_` prefix. I ap
 - **Smart card login:** `install_smartcard_packages`, `smartcard_configure_ca`, `smartcard_configure_cert_checking`, `smartcard_configure_crl`, `smartcard_pam_enabled`
 - **SSSD** (the service that links logins to a smart card or a company directory, which this lab does not have): `service_sssd_enabled`, `sssd_certification_path_trust_anchor`, `sssd_enable_pam_services`, `sssd_enable_smartcards`, `sssd_enable_user_cert`, `sssd_offline_cred_expiration`
 - **FIPS mode:** `is_fips_mode_enabled` (a U.S. government encryption standard)
-- **Military time server:** `chronyd_specify_remote_server`. The scanner only accepts the exact server `0.us.pool.ntp.mil`, which did not resolve from this home network. Chrony is synced to public NIST servers instead (see Fix 26).
+- **Military time server:** `chronyd_specify_remote_server`. The scanner only accepts the exact server `0.us.pool.ntp.mil`, which did not resolve from this home network. Chrony is synced to public NIST servers instead (see Fix 26 in the runbook).
 
 **Real fixes still to do (8 rules):**
 
