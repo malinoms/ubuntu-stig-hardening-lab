@@ -41,8 +41,10 @@ The raw XML and HTML reports are not published here because they contain host de
 | Nov 11, after Fixes 24 to 26 | 79.15% | 188 pass, 26 fail (raw score 79.151375). Password, package-cleanup and chrony time-sync rules. `chronyd_specify_remote_server` still failed, by design |
 | Nov 11, after Fix 27 and a reboot | 85.87% | 198 pass, 23 fail (raw score 85.873016). 10 more rules passed, but only 3 fewer failed: not-applicable dropped from 20 to 13 after the SSSD packages were installed |
 | Nov 11, about 9:48 PM, after Fix 28 | 86.43% | 21 fail (raw score 86.428566). Pass count was not recorded |
+| Nov 12, after Fix 29 | 87.22% | sudo now requires a password. Up from 86.43%. Pass and fail counts were not recorded |
+| Nov 12, final (`results-nov12b`), after Fix 30 | 91.59% | 18 fail. Pass count was not recorded. Boot loader password set. `file_permissions_var_log_stig` failed again after the reboot |
 
-I only kept the headline score for the scans between the baseline and November 2, so per-rule counts for those scans are not listed here. From November 2 on I kept the counts, except for two November 11 scans: the 9:25 PM rescan (fail count only) and the final 9:48 PM scan (score and fail count only). The table compares the weighted oscap score throughout. The score does not rise one-for-one with rules passed: going from 98 to 157 passed rules moved it 3.4 points. Installing packages can also make previously not-applicable rules start to apply, so the fail count can drop less than the pass count rises.
+I only kept the headline score for the scans between the baseline and November 2, so per-rule counts for those scans are not listed here. From November 2 on I kept the counts, except where a cell says they were not recorded: the November 11 9:25 PM rescan (fail count only), the November 11 final scan (score and fail count only), and both November 12 scans (the midpoint is the score only; the final scan is the score and a fail count of 18). The table compares the weighted oscap score throughout. The score went from 51.38% on the baseline to 86.43% at the end of November 11, then to 87.22% after Fix 29 and 91.59% at the end of November 12. The score does not rise one-for-one with rules passed: going from 98 to 157 passed rules moved it 3.4 points. Installing packages can also make previously not-applicable rules start to apply, so the fail count can drop less than the pass count rises.
 
 Scan commands, and a lesson from the Fix 16 rescan: the content file was in my home folder (`~/scap-security-guide-0.1.82/ssg-ubuntu2404-ds.xml`), not under `/usr/share`. My first command sent all output to `/dev/null`, so the wrong path only showed up as a missing results file. Discard stdout only, so errors stay visible.
 
@@ -104,10 +106,14 @@ Scan commands, and a lesson from the Fix 16 rescan: the content file was in my h
 | 27 | `grub2_audit_argument` | fail |
 | 28 | `file_permissions_var_log_stig` | fail (regressed after the Fix 27 reboot when new logs were created) |
 | 28 | `audit_sudo_log_events` | fail |
+| 29 | `sudo_remove_nopasswd` | fail (listed under Fix 11; the cloud-init drop-in still had NOPASSWD on November 12) |
+| 29 | `sudo_require_authentication` | fail |
+| 30 | `grub2_password` | fail |
+| 30 | `grub2_uefi_password` | fail |
 
-Rule IDs are shown without the `xccdf_org.ssgproject.content_rule_` prefix. I applied these fixes to target these rules. I did not record per-rule results from the later rescans, only the overall score. Fixes 17 to 23 are listed in the README and the runbook; I did not add them to this table at the time.
+Rule IDs are shown without the `xccdf_org.ssgproject.content_rule_` prefix. I applied these fixes to target these rules. I did not record a full per-rule list from the later rescans, only the overall score. For the November 12 final scan I did record that the Fixes 29 and 30 rules passed, and that `file_permissions_var_log_stig` failed again. Fixes 17 to 23 are listed in the README and the runbook; I did not add them to this table at the time.
 
-## Still failing after the 86.43% scan (21 rules)
+## Still failing after the 91.59% scan (18 rules)
 
 "Done" for this lab means every remaining rule either passes or is written up as an accepted exception with a reason.
 
@@ -118,11 +124,10 @@ Rule IDs are shown without the `xccdf_org.ssgproject.content_rule_` prefix. I ap
 - **FIPS mode:** `is_fips_mode_enabled` (a U.S. government encryption standard)
 - **Military time server:** `chronyd_specify_remote_server`. The scanner only accepts the exact server `0.us.pool.ntp.mil`, which did not resolve from this home network. Chrony is synced to public NIST servers instead (see Fix 26 in the runbook).
 
-**Real fixes still to do (8 rules):**
+**Real fixes still to do (5 rules):**
 
-- **Boot loader password** (next session, lockout risk): `grub2_password`, `grub2_uefi_password`
-- **sudo authentication** (next session, lockout risk): `sudo_remove_nopasswd`, `sudo_require_authentication`
-- **Remote logging and audit offload** (need a log receiver, possibly a small container): `rsyslog_remote_access_monitoring`, `auditd_audispd_configure_remote_server`, `auditd_offload_logs`
+- **Remote logging and audit offload** (next session; they need a central log server, possibly a small container): `rsyslog_remote_access_monitoring`, `auditd_audispd_configure_remote_server`, `auditd_offload_logs`
+- **Log permissions, again:** `file_permissions_var_log_stig`. It passed after Fix 28 and failed after the November 12 reboot, because some log files came back with looser permissions.
 - **Audit, last:** `audit_rules_immutable`
 
-After those, the confirmed fixes can be automated with Ansible.
+After those, the confirmed fixes can be automated with Ansible. sudo now requires a password, so that automation cannot rely on passwordless sudo.
