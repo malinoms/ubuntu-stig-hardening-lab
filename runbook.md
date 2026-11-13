@@ -1,6 +1,6 @@
 # Ubuntu 24.04 STIG Hardening Runbook
 
-How to use this: work through each finding in order. Run the commands on the target server, then run the verify step. Every finding is tied to the rule title in the OpenSCAP report. This runbook covers Fixes 1 to 28.
+How to use this: work through each finding in order. Run the commands on the target server, then run the verify step. Every finding is tied to the rule title in the OpenSCAP report. This runbook covers Fixes 1 to 30.
 
 Placeholders used below: `<vmid>` is the Proxmox VM ID of the lab VM, `<user>` is the admin account on the lab VM, `<proxmox-host>` and `<lab-vm>` are addresses, and `~/.ssh/<lab-key>` is the SSH key used for the lab.
 
@@ -1049,7 +1049,225 @@ The session started at 75.3% (178 passed, 36 failed) from November 3 and ended a
 - oscap does not print the overall score to the terminal. Read it from the results file (`grep` for `<score`), and use a new results file when you list remaining failures, or you will see stale names from an older scan.
 - Keep a safety SSH session open and test a fresh login plus `sudo -v` whenever a batch touches login settings.
 
-## Next up: the 21 rules still failing (as of the 86.43% scan)
+## Opening the November 12, 2026 session
+
+The sudo rules and the boot loader password were still open, and either one can lock you out. Same scanner as the earlier sessions: SCAP Security Guide 0.1.82, profile `xccdf_org.ssgproject.content_profile_stig`. Before any change I took a snapshot on the Proxmox host. This is the rollback point for the whole session:
+
+```bash
+qm snapshot <vmid> nov12-pre-grub
+```
+
+Keep the VM console available. The rest of the session is on the lab VM.
+
+---
+
+## Fix 29: Require a password for sudo
+
+**Rules:** `sudo_remove_nopasswd`, `sudo_require_authentication`
+
+### The finding
+
+Both rules were still failing at the end of November 11. `/etc/sudoers.d/90-cloud-init-users` still had `<user> ALL=(ALL) NOPASSWD:ALL`. The cloud image wrote that line, so anyone at that user's session could become root with no password. Fix 11 describes the same change made with `visudo`. On this VM the NOPASSWD grant was still there.
+
+### Why it matters
+
+Re-entering the password before root access stops someone who grabs an unlocked session from taking over the system. `sudo_require_authentication` is the companion rule: sudo has to ask, which a `NOPASSWD` grant skips.
+
+### Safety first
+
+- The snapshot `nov12-pre-grub` is the rollback point.
+- The account needs a real password before you remove `NOPASSWD`, or sudo stops working. Fix 11 set one. `sudo passwd -S <user>` should show `P`.
+- Open a root shell (`sudo -i`) in a second window and leave it open until the test below passes. A bad sudoers file cannot be fixed from a normal SSH session.
+- `visudo -c` checks syntax after the edit. It does not stop a bad line from being saved. If it does not report `parsed OK`, fix the file from the root shell or roll back to the snapshot before you close that shell.
+
+### Check first
+
+```bash
+sudo grep NOPASSWD /etc/sudoers.d/90-cloud-init-users
+```
+
+A line `<user> ALL=(ALL) NOPASSWD:ALL` means the rule is still open.
+
+### The fix
+
+```bash
+sudo sed -i 's/<user> ALL=(ALL) NOPASSWD:ALL/<user> ALL=(ALL) ALL/' /etc/sudoers.d/90-cloud-init-users
+sudo visudo -c
+```
+
+`visudo -c` should report `parsed OK` for `/etc/sudoers` and for the cloud-init drop-in.
+
+### Verify
+
+```bash
+sudo grep -r NOPASSWD /etc/sudoers /etc/sudoers.d/
+sudo -k
+sudo whoami
+```
+
+The grep should print nothing. `sudo -k` forgets the cached password. `sudo whoami` should ask for the password and then print `root`.
+
+From `~/scap-security-guide-0.1.82`, both rules should report `pass`:
+
+```bash
+P=xccdf_org.ssgproject.content_profile_stig
+sudo oscap xccdf eval --profile $P --rule xccdf_org.ssgproject.content_rule_sudo_remove_nopasswd ssg-ubuntu2404-ds.xml
+sudo oscap xccdf eval --profile $P --rule xccdf_org.ssgproject.content_rule_sudo_require_authentication ssg-ubuntu2404-ds.xml
+```
+
+When both pass, `exit` the root safety shell.
+
+### Lesson learned
+
+Once sudo requires a password, automation and remote checks that relied on passwordless sudo stop working. Plan for that before you script later fixes.
+
+---
+
+## Rescan after Fix 29: 87.22%
+
+A full profile scan after the sudo change scored **87.22%**, up from 86.43% at the end of November 11. I did not record the pass count or the fail count for this scan.
+
+---
+
+## Fix 30: Boot loader password
+
+**Rules:** `grub2_password`, `grub2_uefi_password`
+
+### The finding
+
+GRUB had no password. Anyone at the console could edit a boot entry or open the GRUB command line. The scanner has no automatic fix for either rule. `oscap xccdf generate fix --rule` still writes the whole profile, and filtering that output shows no fix script for these two rules.
+
+### Why it matters
+
+A boot loader password stops someone at the console from changing boot options, for example to turn audit off or to boot into a root shell. Normal boots should still start with no prompt. Only editing an entry or opening the GRUB command line should ask for the password.
+
+### Safety first
+
+Covered by the `nov12-pre-grub` snapshot. A broken GRUB config can stop the VM from booting. Keep the Proxmox console open, and roll back to that snapshot if the machine does not boot.
+
+### The fix
+
+Set the password by hand.
+
+1. Generate a hash. `grub-mkpasswd-pbkdf2` asks for a password twice and prints one line that starts with `grub.pbkdf2.sha512.`. That line is the hash. The password itself does not go in the file. Do not write the real hash into notes or into this repo. The examples below use the placeholder `grub.pbkdf2.sha512.<your-hash>`.
+
+   ```bash
+   grub-mkpasswd-pbkdf2
+   ```
+
+2. Add two lines to `/etc/grub.d/40_custom`, after the `exec tail -n +3 $0` line. Lines above that `exec` are not copied into `grub.cfg`. The stock comments below it can stay. The hash goes on the same line as `password_pbkdf2 root`, with one space between them:
+
+   ```
+   set superusers="root"
+   password_pbkdf2 root grub.pbkdf2.sha512.<your-hash>
+   ```
+
+   `set superusers="root"` names the GRUB account that may edit the menu. `password_pbkdf2` stores that account's hash.
+
+3. In `/etc/grub.d/10_linux`, add `--unrestricted` to the `CLASS` line so a normal boot does not ask for the password. On Ubuntu 24.04 that line starts as `CLASS="--class gnu-linux --class gnu --class os"`. After the edit:
+
+   ```
+   CLASS="--class gnu-linux --class gnu --class os --unrestricted"
+   ```
+
+   The Linux menu entries use that `CLASS` value, so they boot without a password. Editing an entry or opening the GRUB command line still requires the superuser password.
+
+4. Rebuild the boot menu and check the generated file, not only the file you edited:
+
+   ```bash
+   sudo update-grub
+   sudo grep password_pbkdf2 /boot/grub/grub.cfg | cut -c1-45
+   ```
+
+   The grep should show a `password_pbkdf2` line. `cut -c1-45` prints the start of the line so the full hash does not land in the scrollback. The hash in `grub.cfg` has to start with `grub.pbkdf2.sha512.`.
+
+5. Reboot. A normal boot should reach the login prompt with no GRUB password.
+
+### Verify
+
+The scanner passes both rules when `/boot/grub/grub.cfg` contains a `password_pbkdf2` line with a `grub.pbkdf2.sha512` hash. A `GRUB2_PASSWORD=` line in `/boot/grub/user.cfg` also satisfies the check. This session used the `grub.cfg` form. Both rules passed on the final scan below.
+
+### If the hash is still a placeholder, or it landed on its own line
+
+The first attempt left the literal word `HASH` on the `password_pbkdf2` line. GRUB then had no real password, and both rules failed, even though the file looked finished.
+
+Pasting the hash in nano put it on its own line instead of in place of the placeholder. Check the end of the source file before you trust it:
+
+```bash
+tail -n 3 /etc/grub.d/40_custom | cut -c1-45
+```
+
+The last lines should show one `password_pbkdf2 root grub.pbkdf2.sha512.` line. A line that still says `HASH`, with the hash on the next line, is the form that fails. This sed moves a hash that sits on its own line onto the `password_pbkdf2` line and replaces the word `HASH`:
+
+```bash
+sudo sed -i -e '/^grub\.pbkdf2\.sha512/{h;d}' -e '/password_pbkdf2 root HASH/{x;s/^/password_pbkdf2 root /}' /etc/grub.d/40_custom
+```
+
+Run `sudo update-grub` again and recheck `grub.cfg`.
+
+### Lesson learned
+
+A placeholder left in a config file fails silently. Check the generated `/boot/grub/grub.cfg`, not only `/etc/grub.d/40_custom`.
+
+---
+
+## Final scan on November 12: 91.59%
+
+After the reboot that confirmed a normal boot needs no GRUB password:
+
+```bash
+cd ~/scap-security-guide-0.1.82
+sudo oscap xccdf eval --profile xccdf_org.ssgproject.content_profile_stig --results ~/results-nov12b.xml --report ~/report-nov12b.html ssg-ubuntu2404-ds.xml
+sudo grep -o '<score[^>]*>[^<]*' ~/results-nov12b.xml
+```
+
+Weighted score **91.59%**. 18 rules failed. I did not record the pass count, so I do not claim one.
+
+oscap does not print the overall score. The grep above is how to read it. A results file written by sudo is owned by root with mode 600. Change the owner, then you can read the file without sudo:
+
+```bash
+sudo chown $USER ~/results-nov12b.xml ~/report-nov12b.html
+```
+
+Check single rules in that file. Replace the names in the `for` line if you want a different set:
+
+```bash
+for r in sudo_remove_nopasswd sudo_require_authentication grub2_password grub2_uefi_password file_permissions_var_log_stig; do
+  echo -n "$r: "
+  grep -A3 "content_rule_$r\"" ~/results-nov12b.xml | grep -o 'result>[a-z]*' | head -1
+done
+```
+
+The four rules from Fixes 29 and 30 show `result>pass`. `file_permissions_var_log_stig` shows `result>fail`. It had passed after Fix 28. After this reboot, some log files were back with looser permissions.
+
+---
+
+## Rescans on November 12, 2026
+
+| When | Weighted score | Passed | Failed | What changed |
+|---|---|---|---|---|
+| After Fix 29 | **87.22%** | not recorded | not recorded | sudo now asks for a password. Up from 86.43% |
+| Final (`results-nov12b`), after Fix 30 and a reboot | **91.59%** | not recorded | 18 | Boot loader password set. `file_permissions_var_log_stig` failed again after the reboot |
+
+The session started at 86.43% (21 rules failing) and ended at 91.59% (18 rules failing).
+
+---
+
+## Lessons learned on November 12
+
+- A placeholder left in a config file fails silently. The first attempt left the literal word `HASH` in `/etc/grub.d/40_custom`, so GRUB had no real password and both boot loader rules failed even though the setup looked complete. Check the generated `/boot/grub/grub.cfg`, not only the source file.
+- Pasting the hash in nano put it on its own line instead of replacing the placeholder. Check the last lines with `tail -n 3 /etc/grub.d/40_custom | cut -c1-45`. The sed one-liner in Fix 30 moves that hash onto the `password_pbkdf2` line.
+- Do not wrap a command in backticks when you paste it into a shell. The shell runs the command, then runs the command's output as another command.
+- `oscap xccdf eval` does not print an overall score. Read it with `sudo grep -o '<score[^>]*>[^<]*' ~/results-X.xml`. A results file written with sudo is owned by root with mode 600, so `sudo chown $USER` on that file before you read it without sudo. To check single rules, replace `RULES` with the short rule names and `FILE` with the results file:
+
+  ```bash
+  for r in RULES; do echo -n "$r: "; grep -A3 "content_rule_$r\"" FILE | grep -o 'result>[a-z]*' | head -1; done
+  ```
+
+- `oscap xccdf generate fix --rule` still printed the whole profile. Filter that output to see whether a rule has an automatic fix. Both GRUB password rules had none.
+- Once sudo requires a password, automation and remote checks that relied on passwordless sudo stop working. Plan for that.
+
+## Next up: the 18 rules still failing (as of the 91.59% scan)
 
 "Done" means every remaining rule either passes or is written up as an accepted exception with a reason.
 
@@ -1058,16 +1276,15 @@ The session started at 75.3% (178 passed, 36 failed) from November 3 and ended a
 - **Smart card login:** `install_smartcard_packages`, `smartcard_configure_ca`, `smartcard_configure_cert_checking`, `smartcard_configure_crl`, `smartcard_pam_enabled`
 - **SSSD** (the service that links logins to a smart card or a company directory, which a standalone home lab does not have): `service_sssd_enabled`, `sssd_certification_path_trust_anchor`, `sssd_enable_pam_services`, `sssd_enable_smartcards`, `sssd_enable_user_cert`, `sssd_offline_cred_expiration`
 - **FIPS mode:** `is_fips_mode_enabled`
-- **Military time server:** `chronyd_specify_remote_server` (see Fix 26)
+- **Military time server:** `chronyd_specify_remote_server` (see Fix 26). The required server does not resolve from this home network.
 
-**Real fixes still to do (8 rules):**
+**Real fixes still to do (5 rules):**
 
-- **Boot loader password** (next session, lockout risk, snapshot first): `grub2_password`, `grub2_uefi_password`
-- **sudo authentication** (next session, lockout risk, snapshot first): `sudo_remove_nopasswd`, `sudo_require_authentication`
-- **Remote logging and audit offload** (need a log receiver, possibly a small container): `rsyslog_remote_access_monitoring`, `auditd_audispd_configure_remote_server`, `auditd_offload_logs`
+- **Remote logging and audit offload** (next session; they need a central log server, possibly a small container): `rsyslog_remote_access_monitoring`, `auditd_audispd_configure_remote_server`, `auditd_offload_logs`
+- **Log permissions, again:** `file_permissions_var_log_stig`. It passed after Fix 28 and failed after the Fix 30 reboot, because some log files came back with looser permissions.
 - **Audit, last:** `audit_rules_immutable`
 
-After those, automate the confirmed fixes with Ansible.
+After those, automate the confirmed fixes with Ansible. sudo now requires a password, so that automation cannot rely on passwordless sudo.
 
 ---
 
@@ -1089,10 +1306,12 @@ After those, automate the confirmed fixes with Ansible.
 | Nov 11, after Fixes 24 to 26 | 79.15% | 188 | 26 | Password, package-cleanup and chrony rules |
 | Nov 11, after Fix 27 and a reboot | 85.87% | 198 | 23 | Packages, permissions, AIDE, audit at boot |
 | Nov 11, about 9:48 PM, after Fix 28 | 86.43% | not recorded | 21 | Log permissions re-applied, sudo use logged |
+| Nov 12, after Fix 29 | 87.22% | not recorded | not recorded | sudo now requires a password |
+| Nov 12, final (`results-nov12b`), after Fix 30 | 91.59% | not recorded | 18 | Boot loader password set. Log permissions failed again after the reboot |
 
 The score went down a little between the two November 2 scans (68.73% to 67.95%) even though one more rule passed. I did not compare the two reports rule by rule, so I do not know which rule caused it. I report it as it happened.
 
-Package-install rules are low weight, so the score moves slowly. Fixes 12 to 16 (SSH settings, kernel settings, firewall, time sync, log permissions) added about 6.6 points in one session. The November 11 session (Fixes 24 to 28) moved the weighted score from 75.3% to 86.43%. Remaining real fixes are the boot loader password, sudo authentication, remote logging, and the audit immutable rule last (see "Next up" above).
+Package-install rules are low weight, so the score moves slowly. Fixes 12 to 16 (SSH settings, kernel settings, firewall, time sync, log permissions) added about 6.6 points in one session. The November 11 session (Fixes 24 to 28) moved the weighted score from 75.3% to 86.43%. The November 12 session (Fixes 29 and 30) moved it from 86.43% to 87.22%, then to 91.59%. Remaining real fixes are remote logging to a central log server, the `/var/log` permission rule that failed again after the reboot, and the audit immutable rule last (see "Next up" above).
 
 Full rescan command (from `~/scap-security-guide-0.1.82`):
 - `sudo oscap xccdf eval --profile $P --results ~/results-fixN.xml --report ~/report-fixN.html ssg-ubuntu2404-ds.xml`
